@@ -1,0 +1,1 @@
+{"version":3,"file":"static/css/main.6e1b88e7.css","mappings":"AAAA,EACE,qBACF,CAEA,KAEE,kCAAmC,CADnC,QAEF","sources":["index.css"],"sourcesContent":["* {\n  box-sizing: border-box;\n}\n\nbody {\n  margin: 0;\n  -webkit-font-smoothing: antialiased;\n}\n"],"names":[],"sourceRoot":""}
