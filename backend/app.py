@@ -203,6 +203,11 @@ def check_deadlines():
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_deadlines, "interval", hours=24)
 
+with app.app_context():
+    db.create_all()
+if not scheduler.running:
+    scheduler.start()
+
 
 @app.cli.command("init-db")
 def init_db():
@@ -212,7 +217,4 @@ def init_db():
 
 
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
-    scheduler.start()
     app.run(host="0.0.0.0", port=5000, debug=True)
