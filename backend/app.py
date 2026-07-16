@@ -26,11 +26,13 @@ db = SQLAlchemy(app)
 STATUS_CHOICES = ["Applied", "Interviewing", "Offer", "Rejected", "Withdrawn"]
 
 
+
 # --- Models ---
 class Application(db.Model):
     __tablename__ = "applications"
 
     id = db.Column(db.Integer, primary_key=True)
+    device_id = db.Column(db.String(64), nullable=False, index=True) 
     company = db.Column(db.String(120), nullable=False)
     role = db.Column(db.String(120), nullable=False)
     status = db.Column(db.String(30), nullable=False, default="Applied")
@@ -55,6 +57,11 @@ class Application(db.Model):
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
+def get_device_id():                                    
+    device_id = request.headers.get("X-Device-Id")
+    if not device_id:
+        return None
+    return device_id
 
 # --- Email helper ---
 def send_email(to_email, subject, content):
@@ -85,8 +92,12 @@ def health():
 
 @app.route("/api/applications", methods=["GET"])
 def list_applications():
+    device_id = get_device_id()                          
+    if not device_id:                                     
+        return jsonify({"error": "X-Device-Id header is required"}), 400  
+
     status_filter = request.args.get("status")
-    query = Application.query
+    query = Application.query.filter_by(device_id=device_id)
     if status_filter:
         query = query.filter_by(status=status_filter)
     apps = query.order_by(Application.applied_date.desc()).all()
