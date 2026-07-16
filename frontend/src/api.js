@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const API_BASE = process.env.REACT_APP_API_URL || "https://job-tracker-oujc.onrender.com/api";
+const API_BASE = process.env.REACT_APP_API_URL;
 
 function getDeviceId() {                                 
   let id = localStorage.getItem("job_tracker_device_id");
