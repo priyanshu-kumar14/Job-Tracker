@@ -5,6 +5,8 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import inspect, text
+from werkzeug.security import generate_password_hash, check_password_hash
+from itsdangerous import URLSafeTimedSerializer
 import sendgrid
 from sendgrid.helpers.mail import Mail
 
@@ -18,6 +20,7 @@ DATABASE_URL = os.environ.get(
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "super-secret-key-change-in-production")
 
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 FROM_EMAIL = os.environ.get("FROM_EMAIL", "notifications@jobtracker.com")
@@ -28,12 +31,53 @@ STATUS_CHOICES = ["Applied", "Interviewing", "Offer", "Rejected", "Withdrawn"]
 LEGACY_DEVICE_ID = "legacy"
 
 
+# --- Token Helpers ---
+def get_serializer():
+    return URLSafeTimedSerializer(app.config["SECRET_KEY"])
+
+def generate_auth_token(user_id):
+    serializer = get_serializer()
+    return serializer.dumps({"user_id": user_id})
+
+def verify_auth_token(token):
+    serializer = get_serializer()
+    try:
+        data = serializer.loads(token, max_age=86400) # Valid for 1 day
+        return data.get("user_id")
+    except Exception:
+        return None
+
+def get_current_user_id():
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.split(" ")[1]
+    return verify_auth_token(token)
+
 
 # --- Models ---
+class User(db.Model):
+    __tablename__ = "users"
+
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(256), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    applications = db.relationship("Application", backref="user", lazy=True)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+
 class Application(db.Model):
     __tablename__ = "applications"
 
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
     device_id = db.Column(db.String(64), nullable=False, index=True) 
     company = db.Column(db.String(120), nullable=False)
     role = db.Column(db.String(120), nullable=False)
@@ -48,6 +92,7 @@ class Application(db.Model):
     def to_dict(self):
         return {
             "id": self.id,
+            "user_id": self.user_id,
             "company": self.company,
             "role": self.role,
             "status": self.status,
@@ -98,12 +143,6 @@ def ensure_application_device_id_column():
         db.session.commit()
 
 
-def get_application_for_device(app_id, device_id):
-    return Application.query.filter(
-        Application.id == app_id,
-        Application.device_id.in_([device_id, LEGACY_DEVICE_ID]),
-    ).first()
-
 # --- Email helper ---
 def send_email(to_email, subject, content):
     """Send an email via SendGrid. Fails silently (logs) if not configured."""
@@ -146,16 +185,74 @@ def health():
     return jsonify({"status": "ok"})
 
 
+# --- Auth Routes ---
+@app.route("/api/auth/register", methods=["POST"])
+def register():
+    data = request.get_json() or {}
+    username = data.get("username")
+    password = data.get("password")
+    device_id = data.get("device_id")
+
+    if not username or not password:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    username = username.strip()
+    if not username:
+        return jsonify({"error": "Username cannot be blank"}), 400
+
+    if User.query.filter_by(username=username).first():
+        return jsonify({"error": "Username already exists"}), 400
+
+    user = User(username=username)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+
+    # Link anonymous/device applications to this newly registered user
+    if device_id:
+        existing_apps = Application.query.filter_by(device_id=device_id, user_id=None).all()
+        for app_obj in existing_apps:
+            app_obj.user_id = user.id
+        db.session.commit()
+
+    token = generate_auth_token(user.id)
+    return jsonify({"token": token, "username": user.username}), 201
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def login():
+    data = request.get_json() or {}
+    username = data.get("username")
+    password = data.get("password")
+    device_id = data.get("device_id")
+
+    if not username or not password:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    user = User.query.filter_by(username=username.strip()).first()
+    if not user or not user.check_password(password):
+        return jsonify({"error": "Invalid username or password"}), 401
+
+    # Link anonymous/device applications to this user on login
+    if device_id:
+        existing_apps = Application.query.filter_by(device_id=device_id, user_id=None).all()
+        for app_obj in existing_apps:
+            app_obj.user_id = user.id
+        db.session.commit()
+
+    token = generate_auth_token(user.id)
+    return jsonify({"token": token, "username": user.username}), 200
+
+
+# --- Application Routes ---
 @app.route("/api/applications", methods=["GET"])
 def list_applications():
-    device_id = get_device_id()                          
-    if not device_id:                                     
-        return jsonify({"error": "X-Device-Id header is required"}), 400  
+    user_id = get_current_user_id()
+    if not user_id:
+        return jsonify({"error": "Authentication is required"}), 401
 
     status_filter = request.args.get("status")
-    query = Application.query.filter(
-        Application.device_id.in_([device_id, LEGACY_DEVICE_ID])
-    )
+    query = Application.query.filter_by(user_id=user_id)
     if status_filter:
         query = query.filter_by(status=status_filter)
     apps = query.order_by(Application.applied_date.desc()).all()
@@ -164,11 +261,11 @@ def list_applications():
 
 @app.route("/api/applications/<int:app_id>", methods=["GET"])
 def get_application(app_id):
-    device_id = get_device_id()
-    if not device_id:
-        return jsonify({"error": "X-Device-Id header is required"}), 400
+    user_id = get_current_user_id()
+    if not user_id:
+        return jsonify({"error": "Authentication is required"}), 401
 
-    application = get_application_for_device(app_id, device_id)
+    application = Application.query.filter_by(id=app_id, user_id=user_id).first()
     if not application:
         return jsonify({"error": "Application not found"}), 404
     return jsonify(application.to_dict())
@@ -176,16 +273,18 @@ def get_application(app_id):
 
 @app.route("/api/applications", methods=["POST"])
 def create_application():
+    user_id = get_current_user_id()
+    if not user_id:
+        return jsonify({"error": "Authentication is required"}), 401
+
     data = request.get_json() or {}
-    device_id = get_device_id()
-
-    if not device_id:
-        return jsonify({"error": "X-Device-Id header is required"}), 400
-
     if not data.get("company") or not data.get("role"):
         return jsonify({"error": "company and role are required"}), 400
 
+    device_id = data.get("device_id") or get_device_id() or "unknown"
+
     application = Application(
+        user_id=user_id,
         device_id=device_id,
         company=data["company"],
         role=data["role"],
@@ -214,11 +313,11 @@ def create_application():
 
 @app.route("/api/applications/<int:app_id>", methods=["PUT"])
 def update_application(app_id):
-    device_id = get_device_id()
-    if not device_id:
-        return jsonify({"error": "X-Device-Id header is required"}), 400
+    user_id = get_current_user_id()
+    if not user_id:
+        return jsonify({"error": "Authentication is required"}), 401
 
-    application = get_application_for_device(app_id, device_id)
+    application = Application.query.filter_by(id=app_id, user_id=user_id).first()
     if not application:
         return jsonify({"error": "Application not found"}), 404
     data = request.get_json() or {}
@@ -252,11 +351,11 @@ def update_application(app_id):
 
 @app.route("/api/applications/<int:app_id>", methods=["DELETE"])
 def delete_application(app_id):
-    device_id = get_device_id()
-    if not device_id:
-        return jsonify({"error": "X-Device-Id header is required"}), 400
+    user_id = get_current_user_id()
+    if not user_id:
+        return jsonify({"error": "Authentication is required"}), 401
 
-    application = get_application_for_device(app_id, device_id)
+    application = Application.query.filter_by(id=app_id, user_id=user_id).first()
     if not application:
         return jsonify({"error": "Application not found"}), 404
     db.session.delete(application)
@@ -266,17 +365,54 @@ def delete_application(app_id):
 
 @app.route("/api/stats", methods=["GET"])
 def stats():
-    device_id = get_device_id()
-    if not device_id:
-        return jsonify({"error": "X-Device-Id header is required"}), 400
+    user_id = get_current_user_id()
+    if not user_id:
+        return jsonify({"error": "Authentication is required"}), 401
 
-    apps = Application.query.filter(
-        Application.device_id.in_([device_id, LEGACY_DEVICE_ID])
-    ).all()
+    apps = Application.query.filter_by(user_id=user_id).all()
     counts = {s: 0 for s in STATUS_CHOICES}
     for a in apps:
         counts[a.status] = counts.get(a.status, 0) + 1
     return jsonify({"total": len(apps), "by_status": counts})
+
+
+# --- Database Schema Migration Helper ---
+def ensure_application_columns():
+    inspector = inspect(db.engine)
+    if not inspector.has_table("applications"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("applications")}
+    if "device_id" not in columns:
+        db.session.execute(text("ALTER TABLE applications ADD COLUMN device_id VARCHAR(64)"))
+        db.session.execute(
+            text(
+                "UPDATE applications "
+                "SET device_id = :legacy_id "
+                "WHERE device_id IS NULL"
+            ),
+            {"legacy_id": LEGACY_DEVICE_ID},
+        )
+        db.session.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_applications_device_id "
+                "ON applications (device_id)"
+            )
+        )
+        db.session.commit()
+    else:
+        db.session.execute(
+            text(
+                "UPDATE applications "
+                "SET device_id = :legacy_id "
+                "WHERE device_id IS NULL"
+            ),
+            {"legacy_id": LEGACY_DEVICE_ID},
+        )
+        db.session.commit()
+
+    if "user_id" not in columns:
+        db.session.execute(text("ALTER TABLE applications ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+        db.session.commit()
 
 
 # --- Deadline reminder job (runs daily) ---
@@ -303,7 +439,7 @@ scheduler.add_job(check_deadlines, "interval", hours=24)
 
 with app.app_context():
     db.create_all()
-    ensure_application_device_id_column()
+    ensure_application_columns()
 if not scheduler.running:
     scheduler.start()
 

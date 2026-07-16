@@ -5,6 +5,10 @@ import {
   updateApplication,
   deleteApplication,
   getStats,
+  login,
+  register,
+  logout,
+  getAuthUser,
 } from "./api";
 
 const STATUS_CHOICES = ["Applied", "Interviewing", "Offer", "Rejected", "Withdrawn"];
@@ -28,6 +32,7 @@ const emptyForm = {
 };
 
 export default function App() {
+  const [user, setUser] = useState(getAuthUser());
   const [applications, setApplications] = useState([]);
   const [stats, setStats] = useState(null);
   const [form, setForm] = useState(emptyForm);
@@ -36,6 +41,7 @@ export default function App() {
   const [error, setError] = useState("");
 
   const loadData = useCallback(async () => {
+    if (!user) return;
     setLoading(true);
     setError("");
     try {
@@ -54,7 +60,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [filter]);
+  }, [filter, user]);
 
   useEffect(() => {
     loadData();
@@ -86,11 +92,37 @@ export default function App() {
     loadData();
   };
 
+  const handleAuthSuccess = (userData) => {
+    setUser(userData);
+  };
+
+  if (!user) {
+    return <AuthPage onAuthSuccess={handleAuthSuccess} />;
+  }
+
   return (
     <div style={styles.page}>
       <header style={styles.header}>
-        <h1 style={styles.title}>Job Application Tracker</h1>
-        <p style={styles.subtitle}>Track applications, deadlines, and status updates in one place.</p>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }}>
+          <div>
+            <h1 style={styles.title}>Job Application Tracker</h1>
+            <p style={styles.subtitle}>Track applications, deadlines, and status updates in one place.</p>
+          </div>
+          <div style={styles.userSection}>
+            <span style={styles.userName}>Hello, {user.username}</span>
+            <button
+              onClick={() => {
+                logout();
+                setUser(null);
+                setApplications([]);
+                setStats(null);
+              }}
+              style={styles.logoutButton}
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
       </header>
 
       {stats && (
@@ -231,7 +263,204 @@ function StatCard({ label, value, color }) {
   );
 }
 
+function AuthPage({ onAuthSuccess }) {
+  const [isLogin, setIsLogin] = useState(true);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!username || !password) {
+      setError("Username and password are required");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      let res;
+      if (isLogin) {
+        res = await login(username, password);
+      } else {
+        res = await register(username, password);
+      }
+      onAuthSuccess(res);
+    } catch (err) {
+      setError(
+        err.response?.data?.error || 
+        (isLogin ? "Failed to log in" : "Failed to register")
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={styles.authPage}>
+      <div style={styles.authCard}>
+        <h2 style={styles.authTitle}>Job Application Tracker</h2>
+        <p style={styles.authSubtitle}>
+          {isLogin ? "Sign in to your account" : "Create a new account"}
+        </p>
+
+        {error && (
+          <div style={{ ...styles.error, marginBottom: 16 }}>
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} style={styles.authForm}>
+          <div style={styles.authInputGroup}>
+            <label style={styles.authLabel}>Username</label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Enter your username"
+              style={styles.authInput}
+              required
+            />
+          </div>
+
+          <div style={styles.authInputGroup}>
+            <label style={styles.authLabel}>Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter your password"
+              style={styles.authInput}
+              required
+            />
+          </div>
+
+          <button type="submit" disabled={loading} style={styles.authButton}>
+            {loading ? "Please wait..." : isLogin ? "Sign In" : "Register"}
+          </button>
+        </form>
+
+        <p style={styles.authToggleText}>
+          {isLogin ? "Don't have an account?" : "Already have an account?"}
+          <span
+            onClick={() => {
+              setIsLogin(!isLogin);
+              setError("");
+              setUsername("");
+              setPassword("");
+            }}
+            style={styles.authToggleLink}
+          >
+            {isLogin ? "Register here" : "Login here"}
+          </span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
 const styles = {
+  authPage: {
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    minHeight: "100vh",
+    background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
+    fontFamily: "'Segoe UI', system-ui, sans-serif",
+    padding: "20px",
+  },
+  authCard: {
+    background: "rgba(255, 255, 255, 0.95)",
+    borderRadius: "16px",
+    padding: "40px 32px",
+    boxShadow: "0 10px 25px rgba(0, 0, 0, 0.15)",
+    width: "100%",
+    maxWidth: "400px",
+    backdropFilter: "blur(10px)",
+  },
+  authTitle: {
+    fontSize: "24px",
+    fontWeight: "bold",
+    color: "#1e1b4b",
+    marginBottom: "8px",
+    textAlign: "center",
+  },
+  authSubtitle: {
+    fontSize: "14px",
+    color: "#4f46e5",
+    marginBottom: "28px",
+    textAlign: "center",
+  },
+  authForm: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "16px",
+  },
+  authInputGroup: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+  },
+  authLabel: {
+    fontSize: "12px",
+    fontWeight: "600",
+    color: "#4b5563",
+  },
+  authInput: {
+    padding: "12px 14px",
+    borderRadius: "8px",
+    border: "1px solid #d1d5db",
+    fontSize: "14px",
+    outline: "none",
+  },
+  authButton: {
+    marginTop: "12px",
+    padding: "12px",
+    background: "#4f46e5",
+    color: "#fff",
+    border: "none",
+    borderRadius: "8px",
+    fontSize: "15px",
+    fontWeight: "600",
+    cursor: "pointer",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  authToggleText: {
+    fontSize: "13px",
+    textAlign: "center",
+    color: "#4b5563",
+    marginTop: "20px",
+  },
+  authToggleLink: {
+    color: "#4f46e5",
+    fontWeight: "600",
+    cursor: "pointer",
+    marginLeft: "4px",
+    textDecoration: "underline",
+  },
+  userSection: {
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+  },
+  userName: {
+    fontSize: "14px",
+    fontWeight: "600",
+    color: "#374151",
+  },
+  logoutButton: {
+    padding: "8px 16px",
+    background: "#fee2e2",
+    color: "#b91c1c",
+    border: "none",
+    borderRadius: "6px",
+    cursor: "pointer",
+    fontSize: "13px",
+    fontWeight: "600",
+    transition: "background-color 0.2s",
+  },
   page: {
     fontFamily: "'Segoe UI', system-ui, sans-serif",
     maxWidth: 1100,
