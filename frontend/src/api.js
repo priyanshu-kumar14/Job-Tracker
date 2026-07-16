@@ -1,5 +1,6 @@
 import axios from "axios";
 
+const API_BASE = process.env.REACT_APP_API_URL || "https://job-tracker-oujc.onrender.com/api";
 
 function getDeviceId() {                                 
   let id = localStorage.getItem("job_tracker_device_id");
@@ -15,10 +16,6 @@ const api = axios.create({
   headers: { "X-Device-Id": getDeviceId() },            
 });
 
-
-const API_BASE = process.env.REACT_APP_API_URL || "https://job-tracker-oujc.onrender.com/api";
-
-const api = axios.create({ baseURL: API_BASE });
 
 export const getApplications = (status) =>
   api.get("/applications", { params: status ? { status } : {} }).then((r) => r.data);
