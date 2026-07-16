@@ -287,8 +287,11 @@ function AuthPage({ onAuthSuccess }) {
       }
       onAuthSuccess(res);
     } catch (err) {
+      console.error("Auth error:", err);
       setError(
         err.response?.data?.error || 
+        err.response?.data?.message || 
+        err.message ||
         (isLogin ? "Failed to log in" : "Failed to register")
       );
     } finally {
