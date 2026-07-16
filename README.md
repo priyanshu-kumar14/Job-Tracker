@@ -15,7 +15,7 @@ containerized with **Docker**, and deployable to **Google Cloud**.
 - Fully containerized with Docker Compose (frontend + backend + Postgres)
 
 ## Tech Stack
-- **Frontend:** React, Axios
+- **Frontend:** React, Vite, Axios
 - **Backend:** Flask, Flask-SQLAlchemy, APScheduler
 - **Database:** PostgreSQL
 - **Email:** SendGrid API
@@ -30,11 +30,12 @@ job-tracker/
 │   ├── Dockerfile
 │   └── .env.example
 ├── frontend/
+│   ├── index.html         # Vite entry HTML
+│   ├── vite.config.mjs
 │   ├── src/
-│   │   ├── App.js          # Main UI: form, list, stats
+│   │   ├── App.jsx         # Main UI: form, list, stats
 │   │   ├── api.js          # Axios API client
-│   │   └── index.js
-│   ├── public/index.html
+│   │   └── main.jsx        # React bootstrap
 │   ├── package.json
 │   └── Dockerfile
 ├── docker-compose.yml
@@ -73,8 +74,10 @@ python app.py
 ```
 cd frontend
 npm install
-npm start
+npm run dev
 ```
+
+The Vite dev server runs on http://localhost:5173 by default.
 
 ## API Endpoints
 

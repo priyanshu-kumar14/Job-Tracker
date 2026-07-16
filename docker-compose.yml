@@ -29,12 +29,15 @@ services:
              gunicorn --bind 0.0.0.0:5000 --workers 2 app:app"
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:5001/api
     restart: unless-stopped
     depends_on:
       - backend
     environment:
-      REACT_APP_API_URL: http://localhost:5001/api
+      VITE_API_URL: http://localhost:5001/api
     ports:
       - "3000:80"
 
