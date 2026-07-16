@@ -43,7 +43,14 @@ export default function App() {
       setApplications(apps);
       setStats(statData);
     } catch (e) {
-      setError("Could not reach the backend API. Is it running?");
+      if (e.response) {
+        const backendError = e.response.data?.error || e.response.data?.message || "";
+        setError(`Backend error: ${e.response.status} ${e.response.statusText || ""}.${backendError ? " " + backendError : ""}`);
+      } else if (e.request) {
+        setError("Could not reach the backend API. Is it running? (Network Error)");
+      } else {
+        setError(`Error: ${e.message}`);
+      }
     } finally {
       setLoading(false);
     }

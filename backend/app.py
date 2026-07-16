@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy import inspect, text
 import sendgrid
 from sendgrid.helpers.mail import Mail
 
@@ -24,6 +25,7 @@ FROM_EMAIL = os.environ.get("FROM_EMAIL", "notifications@jobtracker.com")
 db = SQLAlchemy(app)
 
 STATUS_CHOICES = ["Applied", "Interviewing", "Offer", "Rejected", "Withdrawn"]
+LEGACY_DEVICE_ID = "legacy"
 
 
 
@@ -63,6 +65,45 @@ def get_device_id():
         return None
     return device_id
 
+
+def ensure_application_device_id_column():
+    inspector = inspect(db.engine)
+    columns = {column["name"] for column in inspector.get_columns("applications")}
+    if "device_id" not in columns:
+        db.session.execute(text("ALTER TABLE applications ADD COLUMN device_id VARCHAR(64)"))
+        db.session.execute(
+            text(
+                "UPDATE applications "
+                "SET device_id = :legacy_id "
+                "WHERE device_id IS NULL"
+            ),
+            {"legacy_id": LEGACY_DEVICE_ID},
+        )
+        db.session.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_applications_device_id "
+                "ON applications (device_id)"
+            )
+        )
+        db.session.commit()
+    else:
+        db.session.execute(
+            text(
+                "UPDATE applications "
+                "SET device_id = :legacy_id "
+                "WHERE device_id IS NULL"
+            ),
+            {"legacy_id": LEGACY_DEVICE_ID},
+        )
+        db.session.commit()
+
+
+def get_application_for_device(app_id, device_id):
+    return Application.query.filter(
+        Application.id == app_id,
+        Application.device_id.in_([device_id, LEGACY_DEVICE_ID]),
+    ).first()
+
 # --- Email helper ---
 def send_email(to_email, subject, content):
     """Send an email via SendGrid. Fails silently (logs) if not configured."""
@@ -84,6 +125,21 @@ def send_email(to_email, subject, content):
         return False
 
 
+# --- Error Handler ---
+@app.errorhandler(Exception)
+def handle_exception(e):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return jsonify({"error": e.description}), e.code
+    import traceback
+    traceback.print_exc()
+    return jsonify({
+        "error": str(e),
+        "type": type(e).__name__,
+        "traceback": traceback.format_exc()
+    }), 500
+
+
 # --- Routes ---
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -97,7 +153,9 @@ def list_applications():
         return jsonify({"error": "X-Device-Id header is required"}), 400  
 
     status_filter = request.args.get("status")
-    query = Application.query.filter_by(device_id=device_id)
+    query = Application.query.filter(
+        Application.device_id.in_([device_id, LEGACY_DEVICE_ID])
+    )
     if status_filter:
         query = query.filter_by(status=status_filter)
     apps = query.order_by(Application.applied_date.desc()).all()
@@ -106,18 +164,29 @@ def list_applications():
 
 @app.route("/api/applications/<int:app_id>", methods=["GET"])
 def get_application(app_id):
-    application = Application.query.get_or_404(app_id)
+    device_id = get_device_id()
+    if not device_id:
+        return jsonify({"error": "X-Device-Id header is required"}), 400
+
+    application = get_application_for_device(app_id, device_id)
+    if not application:
+        return jsonify({"error": "Application not found"}), 404
     return jsonify(application.to_dict())
 
 
 @app.route("/api/applications", methods=["POST"])
 def create_application():
     data = request.get_json() or {}
+    device_id = get_device_id()
+
+    if not device_id:
+        return jsonify({"error": "X-Device-Id header is required"}), 400
 
     if not data.get("company") or not data.get("role"):
         return jsonify({"error": "company and role are required"}), 400
 
     application = Application(
+        device_id=device_id,
         company=data["company"],
         role=data["role"],
         status=data.get("status", "Applied"),
@@ -145,7 +214,13 @@ def create_application():
 
 @app.route("/api/applications/<int:app_id>", methods=["PUT"])
 def update_application(app_id):
-    application = Application.query.get_or_404(app_id)
+    device_id = get_device_id()
+    if not device_id:
+        return jsonify({"error": "X-Device-Id header is required"}), 400
+
+    application = get_application_for_device(app_id, device_id)
+    if not application:
+        return jsonify({"error": "Application not found"}), 404
     data = request.get_json() or {}
 
     old_status = application.status
@@ -177,7 +252,13 @@ def update_application(app_id):
 
 @app.route("/api/applications/<int:app_id>", methods=["DELETE"])
 def delete_application(app_id):
-    application = Application.query.get_or_404(app_id)
+    device_id = get_device_id()
+    if not device_id:
+        return jsonify({"error": "X-Device-Id header is required"}), 400
+
+    application = get_application_for_device(app_id, device_id)
+    if not application:
+        return jsonify({"error": "Application not found"}), 404
     db.session.delete(application)
     db.session.commit()
     return jsonify({"deleted": app_id})
@@ -185,7 +266,13 @@ def delete_application(app_id):
 
 @app.route("/api/stats", methods=["GET"])
 def stats():
-    apps = Application.query.all()
+    device_id = get_device_id()
+    if not device_id:
+        return jsonify({"error": "X-Device-Id header is required"}), 400
+
+    apps = Application.query.filter(
+        Application.device_id.in_([device_id, LEGACY_DEVICE_ID])
+    ).all()
     counts = {s: 0 for s in STATUS_CHOICES}
     for a in apps:
         counts[a.status] = counts.get(a.status, 0) + 1
@@ -216,6 +303,7 @@ scheduler.add_job(check_deadlines, "interval", hours=24)
 
 with app.app_context():
     db.create_all()
+    ensure_application_device_id_column()
 if not scheduler.running:
     scheduler.start()
 
